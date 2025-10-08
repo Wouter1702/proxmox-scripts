@@ -1,7 +1,29 @@
-# 🚀 Proxmox VE Automated Server VM Deployment
+# 🚀 Proxmox VE Automated Server VM Deployment (Verbose Edition)
 
 This Bash script automates the deployment of **cloud-init–enabled virtual machines** on **Proxmox VE 8/9**.  
-It supports both **local image files** and **cloud image URLs**, automatically handles disk import, resizing, tagging, and optional auto-start.
+It supports both **local image files** and **cloud image URLs**, automatically handles disk import, resizing, tagging, and optional auto-start — now with a **`--verbose`** mode to control command output.
+
+---
+
+## ✨ What's New (Verbose Mode)
+
+- 🆕 Added `--verbose` option to toggle full Proxmox CLI output.
+- 💤 By default, the script hides noisy `qm` and `wget` output for clean logs.
+- 🗣️ When `--verbose` is specified, you see **all** `qm` messages, downloads, and progress.
+- 🔇 Without `--verbose`, only intentional `echo` lines are shown (no system clutter).
+
+Example difference:
+```bash
+# Normal mode (quiet)
+[+] Creating VM (server, ID: 1000)...
+[✓] Disk imported as: local-lvm:vm-1000-disk-0
+
+# Verbose mode
+[+] Creating VM (server, ID: 1000)...
+update VM 1000: -boot c -bootdisk scsi0
+update VM 1000: -ide2 local-lvm:cloudinit
+[✓] Disk imported as: local-lvm:vm-1000-disk-0
+```
 
 ---
 
@@ -15,7 +37,7 @@ It supports both **local image files** and **cloud image URLs**, automatically h
 - ✅ Optional VLAN tagging and MAC address assignment  
 - ✅ Optionally starts the VM after creation (`--startvm true`)  
 - ✅ Supports tagging VMs for organization in the Proxmox UI  
-- ✅ Comprehensive validation and detailed runtime feedback  
+- ✅ **New:** Toggleable verbosity (`--verbose`) for debugging or clean runs  
 
 ---
 
@@ -28,27 +50,13 @@ It supports both **local image files** and **cloud image URLs**, automatically h
 
 ---
 
-## 📦 Installation
-
-```bash
-wget https://example.com/deploy-server.sh -O /root/deploy-server.sh
-chmod +x /root/deploy-server.sh
-```
-
-(Optional) Move it to your scripts directory:
-```bash
-mv /root/deploy-server.sh /usr/local/bin/
-```
-
----
-
 ## 🧠 Usage
 
 ```bash
 ./deploy-server.sh [OPTIONS]
 ```
 
-### Example 1 — Deploy using a Cloud Image URL
+### Example 1 — Quiet Mode (default)
 ```bash
 ./deploy-server.sh \
   --vmid 1000 \
@@ -57,30 +65,29 @@ mv /root/deploy-server.sh /usr/local/bin/
   --cores 2 \
   --ciuser serveradmin \
   --sshkey /etc/pve/priv/ssh-keys \
-  --vlan 128 \
-  --tag homelab \
   --image-url https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img \
   --new-disksize 10G \
   --startvm true
 ```
 
-### Example 2 — Deploy from a Local Image File
+### Example 2 — Verbose Mode (show all `qm` messages)
 ```bash
 ./deploy-server.sh \
   --vmid 1001 \
-  --name testvm \
+  --name debugvm \
   --memory 4096 \
   --cores 4 \
   --ciuser devops \
   --sshkey ~/.ssh/id_rsa.pub \
   --image-file noble-server-cloudimg-amd64.img \
   --image-dir /var/lib/vz/import \
-  --new-disksize 20G
+  --new-disksize 20G \
+  --verbose
 ```
 
 ---
 
-## 🗾 Parameters
+## 🧾 Parameters
 
 | Parameter | Description | Default |
 |------------|-------------|----------|
@@ -101,19 +108,33 @@ mv /root/deploy-server.sh /usr/local/bin/
 | `--sshkey` | SSH public key path | `~/.ssh/id_rsa.pub` |
 | `--startvm` | Auto-start VM after creation (`true`/`false`) | `false` |
 | `--tag` | VM tag (optional) | none |
+| `--verbose` | Show full Proxmox CLI and download output | `false` |
 
 ---
 
-## 🧩 Logic Overview
+## 🧩 Verbose Mode Implementation
 
-1. **Validate Input** — Ensures numeric values, valid MAC format, file existence, and exclusive image source.  
-2. **Prepare Image Directory** — Creates the image directory if it doesn’t exist.  
-3. **Select or Download Image** — Uses existing `.img` or `.img.raw` file if available, otherwise downloads.  
-4. **Create and Configure VM** — Runs `qm create` with all user parameters.  
-5. **Import Disk** — Uses `qm disk import` and determines the actual disk path automatically.  
-6. **Attach and Configure Disk** — Detects next free SCSI slot, attaches the disk, and configures Cloud-Init.  
-7. **Optional Resize** — Resizes disk if `--new-disksize` is larger than the current size.  
-8. **Tagging & Startup** — Optionally tags and starts the VM.  
+Internally, `qm` and `wget` commands are wrapped in helper functions:
+
+```bash
+run_qm() {
+  if [[ "$VERBOSE" == "true" ]]; then
+    qm "$@"
+  else
+    qm "$@" >/dev/null 2>&1
+  fi
+}
+
+wget_dl() {
+  if [[ "$VERBOSE" == "true" ]]; then
+    wget --show-progress -O "$1" "$2"
+  else
+    wget -q -O "$1" "$2"
+  fi
+}
+```
+
+This ensures that normal runs stay clean, while `--verbose` provides all output for debugging or auditing.
 
 ---
 
@@ -146,16 +167,15 @@ Access the VM after boot with:
 
 ---
 
-## 🛠️ Troubleshooting
+## 🧰 Troubleshooting
 
 - **Invalid image file:** Ensure the file is a valid QCOW2 or RAW disk image.  
 - **Import fails:** Check available storage space in the target pool.  
 - **Resize skipped:** The new size must be larger than the original size and include a unit (e.g., `10G`).  
-- **VM won’t start:** Use the Proxmox UI or run `qm start <vmid>` manually.  
+- **Noisy output:** Add `--verbose` to see all commands for debugging.  
 
 ---
 
-## 📄 License
+## 📜 License
 
-MIT License – free to use, modify, and distribute.
-
+MIT License — free to use, modify, and distribute.

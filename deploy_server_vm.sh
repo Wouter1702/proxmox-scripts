@@ -3,10 +3,12 @@
 # VM Deployment Script for Proxmox VE 9.0.x or higher
 # Author: Wouter Iliohan
 #=============================================================
-# Description:
-# This script automates the deployment of an VM in Proxmox VE 9.0 and higher.
-# It supports both local image files and remote cloud images, validates input,
-# handles image import and resizing, and configures cloud-init for SSH access.
+# Deploy a cloud-init–ready Ubuntu/Debian VM on Proxmox VE using either a
+# downloaded cloud image (from --image-url) or a local image file (--image-file).
+# The script minimizes noisy Proxmox CLI output by default; pass --verbose to
+# show native `qm` output. It auto-detects the next free SCSI slot, sets boot
+# order, configures cloud-init, optionally resizes the attached disk, and can
+# tag and start the VM.
 #=============================================================
 
 set -e
@@ -32,35 +34,67 @@ NAMESERVER="1.1.1.1"			 # Default DNS nameserver
 SSHKEY="$HOME/.ssh/id_rsa.pub"	 # Default SSH key for cloud-init access
 STARTVM="false"					 # Whether to start the VM after creation
 TAG=""							 # Optional VM tag for identification
+VERBOSE="false"				     # Whether to show verbose output from qm commands
 
 #=============================================================
 # --- Help and Usage Information ---
 #=============================================================
 usage() {
-    echo "Usage: $0 [OPTIONS]"
-    echo ""
-    echo "Options:"
-    echo "  --vmid <id>             VM ID (default: $VMID)"
-    echo "  --name <name>           VM name (default: $VMNAME)"
-    echo "  --memory <MB>           Memory in MB (default: $MEMORY)"
-    echo "  --cores <num>           CPU cores (default: $CORES)"
-    echo "  --bridge <iface>        Bridge interface (default: $BRIDGE)"
-    echo "  --vlan <tag>            VLAN tag (optional)"
-    echo "  --mac <address>         MAC address (optional, format: XX:XX:XX:XX:XX:XX)"
-    echo "  --storage <pool>        Storage pool (default: $STORAGE)"
-    echo "  --new-disksize <size>   Resize disk after import (e.g., 20G, must be >= image size and include unit K|M|G|T)"
-    echo "  --image-url <url>       Cloud image URL (exclusive with --image-file)"
-    echo "  --image-file <file>     Local image file (exclusive with --image-url)"
-    echo "  --image-dir <dir>       Directory for image storage (optional, default: $IMPORT_DIR)"
-    echo "  --ciuser <user>         Cloud-init user (default: $CIUSER)"
-    echo "  --nameserver <ip>       DNS nameserver (default: $NAMESERVER)"
-    echo "  --sshkey <path>         SSH public key (default: $SSHKEY)"
-    echo "  --startvm <true|false>  Start VM after creation (default: $STARTVM)"
-    echo "  --tag <tag>             VM tag (optional)"
-    echo "  -h, --help              Show this help and exit"
-    echo ""
-    echo "Note: The VM will not start automatically unless you specify --startvm true."
-    exit 0
+cat <<EOF
+Usage: $0 [OPTIONS]
+
+
+Options (in preferred order):
+--vmid <id> VM ID (default: $VMID)
+--name <name> VM name (default: $VMNAME)
+--memory <MB> Memory in MB (default: $MEMORY)
+--cores <num> CPU cores (default: $CORES)
+--bridge <iface> Bridge interface (default: $BRIDGE)
+--vlan <tag> VLAN tag (optional)
+--mac <addr> MAC address (optional, XX:XX:XX:XX:XX:XX)
+--storage <pool> Storage pool (default: $STORAGE)
+--new-disksize <size> Resize after import (e.g., 20G; must include unit)
+--image-url <url> Cloud image URL (exclusive with --image-file)
+--image-file <file> Local image file (exclusive with --image-url)
+--image-dir <dir> Directory for image storage (default: $IMPORT_DIR)
+--ciuser <user> Cloud-init user (default: $CIUSER)
+--nameserver <ip> DNS nameserver (default: $NAMESERVER)
+--sshkey <path> SSH public key (default: $SSHKEY)
+--startvm <true|false> Start VM after creation (default: $STARTVM)
+--tag <tag> VM tag (optional)
+--verbose Enable verbose mode (default: $VERBOSE)
+-h, --help Show this help and exit
+
+
+Notes:
+- The VM will NOT auto-start unless you pass --startvm true.
+- When using --image-url, the script downloads to --image-dir (or $IMPORT_DIR)
+  unless a matching .img.raw or .img (same basename) already exists there.
+- When using --image-file, the script looks in --image-dir (or $IMPORT_DIR) and
+  falls back to the provided absolute/relative path if not found in that dir.
+EOF
+exit 0
+}
+
+#=============================================================
+# --- Helpers for Quiet Execution ---
+#=============================================================
+run_qm() {
+if [[ "$VERBOSE" == "true" ]]; then
+qm "$@"
+else
+qm "$@" >/dev/null 2>&1
+fi
+}
+
+
+wget_dl() {
+# Quiet by default; show progress only if verbose
+if [[ "$VERBOSE" == "true" ]]; then
+wget --show-progress -O "$1" "$2"
+else
+wget -q -O "$1" "$2"
+fi
 }
 
 #=============================================================
@@ -85,6 +119,7 @@ while [[ $# -gt 0 ]]; do
         --sshkey|-sshkey) SSHKEY="$2"; shift 2 ;;
         --startvm) STARTVM="$2"; shift 2 ;;
         --tag) TAG="$2"; shift 2 ;;
+        --verbose) VERBOSE="true"; shift ;;
         -h|--help) usage ;;
         *) echo "❌ Unknown option: $1"; usage ;;
     esac
@@ -193,9 +228,11 @@ fi
 [[ "$STORAGE" == "local-lvm" ]] && DISK_FORMAT="raw"
 echo "[✓] Using disk format: $DISK_FORMAT"
 
-# --- Create VM ---
+#=============================================================
+# Create VM (quiet by default)
+#=============================================================
 echo "[+] Creating VM ($VMNAME, ID: $VMID)..."
-qm create "$VMID" --name "$VMNAME" --memory "$MEMORY" --cores "$CORES" --net0 "$NETCONFIG"
+run_qm create "$VMID" --name "$VMNAME" --memory "$MEMORY" --cores "$CORES" --net0 "$NETCONFIG"
 
 #=============================================================
 # --- Disk Import and Attachment ---
@@ -212,7 +249,10 @@ fi
 
 echo "[✓] Disk imported as: $DISK_PATH"
 
+#=============================================================
 # --- Determine next available SCSI slot ---
+# --- Attach disk to first available SCSI slot ---
+#=============================================================
 NEXT_SCSI=$(for i in {0..15}; do
     if ! qm config "$VMID" | grep -q "^scsi${i}:"; then
         echo "scsi${i}"
@@ -226,18 +266,18 @@ if [ -z "$NEXT_SCSI" ]; then
 fi
 
 echo "[+] Attaching imported disk as $NEXT_SCSI..."
-qm set "$VMID" --scsihw virtio-scsi-pci --"$NEXT_SCSI" "$DISK_PATH"
+run_qm set "$VMID" --scsihw virtio-scsi-pci --"$NEXT_SCSI" "$DISK_PATH"
 
 #=============================================================
 # --- CLOUD-INIT CONFIGURATION ---
 #=============================================================
-qm set "$VMID" --ide2 "$STORAGE:cloudinit"
-qm set "$VMID" --boot c --bootdisk "$NEXT_SCSI"
-qm set "$VMID" --serial0 socket --vga serial0
-qm set "$VMID" --ipconfig0 ip=dhcp
-qm set "$VMID" --sshkey "$SSHKEY"
-qm set "$VMID" --ciuser "$CIUSER"
-qm set "$VMID" --nameserver "$NAMESERVER"
+run_qm set "$VMID" --ide2 "$STORAGE:cloudinit"
+run_qm set "$VMID" --boot c --bootdisk "$NEXT_SCSI"
+run_qm set "$VMID" --serial0 socket --vga serial0
+run_qm set "$VMID" --ipconfig0 ip=dhcp
+run_qm set "$VMID" --sshkey "$SSHKEY"
+run_qm set "$VMID" --ciuser "$CIUSER"
+run_qm set "$VMID" --nameserver "$NAMESERVER"
 
 #=============================================================
 # --- OPTIONAL DISK RESIZE ---
@@ -277,13 +317,13 @@ fi
 #=============================================================
 if [[ -n "$TAG" ]]; then
     echo "[+] Tagging VM with: $TAG"
-    qm set "$VMID" --tags "$TAG"
+    run_qm set "$VMID" --tags "$TAG"
 fi
 
 # --- Optional start VM ---
 if [[ "$STARTVM" == "true" ]]; then
     echo "[+] Starting VM..."
-    qm start "$VMID"
+    run_qm start "$VMID"
     echo "[✓] VM with ID $VMID started successfully."
     VM_STATUS="Started"
 else
